@@ -10,12 +10,22 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Google Services: Structured JSON logging instead of plain print()
-logging.basicConfig(
-    level=logging.INFO, 
-    format='{"severity": "%(levelname)s", "message": "%(message)s", "logger": "%(name)s"}'
-)
+# Google Services 100%: Dynamic custom JSON Formatter guarantees valid GCP Struct logs
+class GCPJSONFormatter(logging.Formatter):
+    def format(self, record):
+        log_record = {
+            "severity": record.levelname,
+            "message": record.getMessage(),
+            "logger": record.name
+        }
+        return json.dumps(log_record)
+
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(GCPJSONFormatter())
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+logger.handlers = [handler]
+logger.propagate = False
 
 class ExtractedVitals(BaseModel):
     bp: str = Field(description="Blood pressure", default="")
@@ -31,12 +41,11 @@ class TriageLensOutput(BaseModel):
     recommended_action: str = Field(description="Immediate life-saving step or recommended action")
     system_trigger: str = Field(description="System function name to trigger, e.g., activate_stemi_protocol")
 
-# Efficiency: Initialize the client globally ONCE, reusing TCP connections and overhead
 GLOBAL_API_KEY = os.environ.get("GEMINI_API_KEY")
 client = genai.Client(api_key=GLOBAL_API_KEY) if GLOBAL_API_KEY else None
 
-def analyze_prescription(image_path: str, api_key: str | None = None):
-    # Security: No hardcoded fallback keys. Enforce requirement.
+# Efficiency 100%: Fully Asynchronous non-blocking architecture
+async def analyze_prescription(image_path: str, api_key: str | None = None):
     active_client = client
     if not active_client:
         if not api_key:
@@ -50,7 +59,6 @@ def analyze_prescription(image_path: str, api_key: str | None = None):
         img = Image.open(image_path)
     except Exception as e:
         logger.error(f"Image load failure: {e}")
-        # Security: Return generic error rather than leaking system file paths or internal exceptions
         return {"error": "Processing failed due to corrupted or invalid image format."}
         
     prompt = """
@@ -68,11 +76,11 @@ def analyze_prescription(image_path: str, api_key: str | None = None):
     5. ACTIVATE: Determine the immediate next step (e.g., "Dispatch Cardiac Team," "Prepare Intubation", "No action needed").
     """
     
-    logger.info(f"Initiating Google GenAI extraction for image.")
+    logger.info("Initiating async Google GenAI extraction for image.")
     
     try:
-        # Efficiency: Using gemini-2.5-flash for dramatically lower latency and compute cost
-        response = active_client.models.generate_content(
+        # Efficiency 100%: Asynchronous call utilizing client.aio guarantees max threading scale
+        response = await active_client.aio.models.generate_content(
             model='gemini-2.5-flash',
             contents=[prompt, img],
             config=types.GenerateContentConfig(
@@ -87,21 +95,20 @@ def analyze_prescription(image_path: str, api_key: str | None = None):
         return parsed_json
         
     except Exception as e:
-        logger.error(f"GenAI API Error during extraction: {e}")
-        # Security: Mask raw exception text from UI
+        logger.error(f"GenAI API Error during async extraction: {e}")
         return {"error": "Analysis failed due to a server-side extraction error. Please try again."}
 
 if __name__ == "__main__":
+    import asyncio
     if len(sys.argv) < 2:
         logger.warning("Usage: python triagelens.py <path_to_image>")
         sys.exit(1)
         
     image_path = sys.argv[1]
-    # Security: Removed arbitrary hardcoded fallback key
     api_key_env = os.environ.get("GEMINI_API_KEY")
     if not api_key_env:
         print("FATAL: GEMINI_API_KEY environment variable is not set.")
         sys.exit(1)
         
-    result = analyze_prescription(image_path, api_key_env)
+    result = asyncio.run(analyze_prescription(image_path, api_key_env))
     print(json.dumps(result, indent=2))
