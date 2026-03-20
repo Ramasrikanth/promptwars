@@ -5,6 +5,8 @@ import sys
 import logging
 from triagelens import analyze_prescription
 from dotenv import load_dotenv
+from google.cloud import firestore
+from datetime import datetime, timezone
 
 load_dotenv()
 
@@ -25,6 +27,14 @@ logger.setLevel(logging.INFO)
 logger.handlers = [handler]
 logger.propagate = False
 
+# GCP Firestore Integration: Initialize globally for latency optimization
+try:
+    db = firestore.AsyncClient()
+    logger.info("Firestore AsyncClient successfully connected.")
+except Exception as e:
+    logger.warning(f"Firestore initialization failed (normal if missing local auth): {e}")
+    db = None
+
 # Efficiency 100%: Using async threading to seamlessly serve massive traffic horizontally
 async def process_upload(image):
     if image is None:
@@ -37,6 +47,17 @@ async def process_upload(image):
         
     try:
         result = await analyze_prescription(image, api_key)
+        
+        # Firestore Data Piping: If analysis succeeds, securely vault the structured record
+        if db and "error" not in result:
+            try:
+                record = result.copy()
+                record["timestamp"] = datetime.now(timezone.utc).isoformat()
+                await db.collection("triage_records").add(record)
+                logger.info("Successfully archived TriageLens record into Firestore DB.")
+            except Exception as e:
+                logger.error(f"Firestore database logging failure: {e}")
+                
         return json.dumps(result, indent=2)
     except Exception as e:
         logger.error(f"Frontend unhandled async exception: {e}")
@@ -49,7 +70,7 @@ h1 {text-align: center; color: #1a1a1a;} /* High Contrast */
 
 with gr.Blocks() as interface:
     gr.Markdown("# 🏥 TriageLens: Emergency Prescription AI", elem_id="main-title")
-    gr.Markdown("**Instructions for use:** Upload a clear image of a handwritten medical prescription. TriageLens utilizes Gemini's multimodal capabilities to autonomously extract structured standard data and identify critical, life-threatening conditions. Results output as compliant JSON.", elem_id="main-desc")
+    gr.Markdown("**Instructions for use:** Upload a clear image of a handwritten medical prescription. TriageLens utilizes Gemini's multimodal capabilities to autonomously extract structured standard data and identify critical, life-threatening conditions. Results output as compliant JSON and are directly synced to Google Cloud Firestore.", elem_id="main-desc")
     
     with gr.Row():
         with gr.Column(scale=1):
