@@ -1,5 +1,5 @@
+gradio
 google-genai
 pillow
 pydantic
-python-dotenv
 python-dotenv
