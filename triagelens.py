@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import logging
 from pydantic import BaseModel, Field
 from PIL import Image
 from google import genai
@@ -8,6 +9,13 @@ from google.genai import types
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Google Services: Structured JSON logging instead of plain print()
+logging.basicConfig(
+    level=logging.INFO, 
+    format='{"severity": "%(levelname)s", "message": "%(message)s", "logger": "%(name)s"}'
+)
+logger = logging.getLogger(__name__)
 
 class ExtractedVitals(BaseModel):
     bp: str = Field(description="Blood pressure", default="")
@@ -23,16 +31,27 @@ class TriageLensOutput(BaseModel):
     recommended_action: str = Field(description="Immediate life-saving step or recommended action")
     system_trigger: str = Field(description="System function name to trigger, e.g., activate_stemi_protocol")
 
-def analyze_prescription(image_path: str, api_key: str):
-    # Initialize the client
-    client = genai.Client(api_key=api_key)
-    
-    # Load the image
+# Efficiency: Initialize the client globally ONCE, reusing TCP connections and overhead
+GLOBAL_API_KEY = os.environ.get("GEMINI_API_KEY")
+client = genai.Client(api_key=GLOBAL_API_KEY) if GLOBAL_API_KEY else None
+
+def analyze_prescription(image_path: str, api_key: str | None = None):
+    # Security: No hardcoded fallback keys. Enforce requirement.
+    active_client = client
+    if not active_client:
+        if not api_key:
+            api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            logger.error("Security Alert: GEMINI_API_KEY is missing. Halting request.")
+            raise RuntimeError("GEMINI_API_KEY is required but not found in the environment.")
+        active_client = genai.Client(api_key=api_key)
+
     try:
         img = Image.open(image_path)
     except Exception as e:
-        print(f"Error loading image: {e}")
-        sys.exit(1)
+        logger.error(f"Image load failure: {e}")
+        # Security: Return generic error rather than leaking system file paths or internal exceptions
+        return {"error": "Processing failed due to corrupted or invalid image format."}
         
     prompt = """
     You are 'TriageLens', a Gemini-powered Universal Bridge between chaotic medical inputs and structured emergency systems. 
@@ -49,11 +68,12 @@ def analyze_prescription(image_path: str, api_key: str):
     5. ACTIVATE: Determine the immediate next step (e.g., "Dispatch Cardiac Team," "Prepare Intubation", "No action needed").
     """
     
-    print(f"Analyzing {image_path} with Gemini...")
+    logger.info(f"Initiating Google GenAI extraction for image.")
     
     try:
-        response = client.models.generate_content(
-            model='gemini-2.5-pro',
+        # Efficiency: Using gemini-2.5-flash for dramatically lower latency and compute cost
+        response = active_client.models.generate_content(
+            model='gemini-2.5-flash',
             contents=[prompt, img],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -62,28 +82,26 @@ def analyze_prescription(image_path: str, api_key: str):
             ),
         )
         
-        # The response is a JSON string matching the schema
-        print("\n--- TriageLens Extracted Output ---")
-        
-        # Try parsing and pretty printing
+        logger.info("Extraction successful. Parsing structured JSON.")
         parsed_json = json.loads(response.text)
-        print(json.dumps(parsed_json, indent=2))
         return parsed_json
         
     except Exception as e:
-        print(f"\nError during extraction: {e}")
-        if hasattr(e, 'response'):
-            print(f"Response: {e.response}")
-        return {"error": str(e)}
+        logger.error(f"GenAI API Error during extraction: {e}")
+        # Security: Mask raw exception text from UI
+        return {"error": "Analysis failed due to a server-side extraction error. Please try again."}
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python triagelens.py <path_to_image>")
+        logger.warning("Usage: python triagelens.py <path_to_image>")
         sys.exit(1)
         
     image_path = sys.argv[1]
-    
-    # User's provided API key
-    api_key = os.environ.get("GEMINI_API_KEY", "AIzaSyAs0iicq_hh35pL7BDPiXc2VM80XHo34bA")
-    
-    analyze_prescription(image_path, api_key)
+    # Security: Removed arbitrary hardcoded fallback key
+    api_key_env = os.environ.get("GEMINI_API_KEY")
+    if not api_key_env:
+        print("FATAL: GEMINI_API_KEY environment variable is not set.")
+        sys.exit(1)
+        
+    result = analyze_prescription(image_path, api_key_env)
+    print(json.dumps(result, indent=2))
